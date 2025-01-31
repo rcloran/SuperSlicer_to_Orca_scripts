@@ -15,6 +15,8 @@ use Term::Form::ReadLine;
 use Text::SimpleTable;
 use JSON::XS;
 
+use Data::Dumper;
+
 # Constants
 my $ORCA_SLICER_VERSION = '1.6.0.0';
 
@@ -230,7 +232,7 @@ sub multivalue_to_array {
     my ($input_string) = @_;
     return () unless defined $input_string;
     my $delimiter = $input_string =~ /,/ ? ',' : ';';
-    return split( /$delimiter/, $input_string );
+    return split( / *$delimiter */, $input_string );
 }
 
 # Subroutine to check if input file is a config bundle
@@ -281,6 +283,9 @@ sub process_config_bundle {
 # Subroutine to translate the feature print sequence settings
 sub evaluate_print_order {
     my ( $external_perimeters_first, $infill_first ) = @_;
+    if (!defined $external_perimeters_first && !defined $infill_first) {
+        return undef;
+    }
     if ( !$external_perimeters_first && !$infill_first ) {
         return "inner wall/outer wall/infill";
     }
@@ -295,12 +300,15 @@ sub evaluate_print_order {
     }
 
     # Default if we somehow fall through to this point
-    return "inner wall/outer wall/infill";
+    return undef
 }
 
 # Subroutine to translate the ironing type settings
 sub evaluate_ironing_type {
     my ( $ironing, $ironing_type ) = @_;
+    if (!defined $ironing_type && !defined $ironing ) {
+        return undef;
+    }
     if ( defined $ironing && $ironing ) {
         return defined $ironing_type ? $ironing_type : "no ironing";
     }
@@ -337,6 +345,8 @@ sub mm_to_percent {
 my %parameter_map = (
     'print' => {
         arc_fitting                     => 'enable_arc_fitting',
+        automatic_infill_combination    => 'infill_combination',
+        automatic_infill_combination_max_layer_height => 'infill_combination_max_layer_height',
         bottom_solid_layers             => 'bottom_shell_layers',
         bottom_solid_min_thickness      => 'bottom_shell_thickness',
         bridge_acceleration             => 'bridge_acceleration',
@@ -381,7 +391,7 @@ my %parameter_map = (
         first_layer_height              => 'initial_layer_print_height',
         interface_shells                => 'interface_shells',
         perimeter_extrusion_width       => 'inner_wall_line_width',
-        seam_gap                        => 'seam_gap',
+        seam_gap_distance               => 'seam_gap',
         solid_infill_acceleration       => 'internal_solid_infill_acceleration',
         solid_infill_extrusion_width    => 'internal_solid_infill_line_width',
         ironing_flowrate                => 'ironing_flow',
@@ -494,7 +504,6 @@ my %parameter_map = (
         bridge_flow_ratio                  => 'bridge_flow',
         fill_top_flow_ratio                => 'top_solid_infill_flow_ratio',
         first_layer_flow_ratio             => 'bottom_solid_infill_flow_ratio',
-        infill_every_layers                => 'infill_combination',
         complete_objects                   => 'print_sequence',
         brim_type                          => 'brim_type',
         notes                              => 'notes',
@@ -509,8 +518,8 @@ my %parameter_map = (
 
     'filament' => {
         bed_temperature => [
-            'hot_plate_temp', 'cool_plate_temp',
-            'eng_plate_temp', 'textured_plate_temp'
+            'hot_plate_temp', # 'cool_plate_temp',
+            # 'eng_plate_temp', 'textured_plate_temp'
         ],
         bridge_fan_speed               => 'overhang_fan_speed',
         chamber_temperature            => 'chamber_temperature',
@@ -545,9 +554,9 @@ my %parameter_map = (
         filament_wipe                  => 'filament_wipe',
         first_layer_bed_temperature    => [
             'hot_plate_temp_initial_layer',
-            'cool_plate_temp_initial_layer',
-            'eng_plate_temp_initial_layer',
-            'textured_plate_temp_initial_layer'
+            # 'cool_plate_temp_initial_layer',
+            # 'eng_plate_temp_initial_layer',
+            # 'textured_plate_temp_initial_layer'
         ],
         first_layer_temperature   => 'nozzle_temperature_initial_layer',
         full_fan_speed_layer      => 'full_fan_speed_layer',
@@ -577,6 +586,8 @@ my %parameter_map = (
         default_filament_profile           => 'default_filament_profile',
         default_print_profile              => 'default_print_profile',
         deretract_speed                    => 'deretraction_speed',
+        extruder_clearance_height          => 'extruder_clearance_height_to_rod',
+        extruder_clearance_radius          => 'extruder_clearance_radius',
         gcode_flavor                       => 'gcode_flavor',
         inherits                           => 'inherits',
         layer_gcode                        => 'layer_change_gcode',
@@ -619,6 +630,8 @@ my %parameter_map = (
         retract_layer_change             => 'retract_when_changing_layer',
         retract_length                   => 'retraction_length',
         retract_lift                     => 'z_hop',
+        retract_lift_above               => 'retract_lift_above',
+        retract_lift_below               => 'retract_lift_below',
         retract_lift_top                 => 'retract_lift_enforce',
         retract_before_travel            => 'retraction_minimum_travel',
         retract_speed                    => 'retraction_speed',
@@ -629,7 +642,12 @@ my %parameter_map = (
         template_custom_gcode            => 'template_custom_gcode',
         use_firmware_retraction          => 'use_firmware_retraction',
         use_relative_e_distances         => 'use_relative_e_distances',
-        wipe                             => 'wipe'
+        wipe                             => 'wipe',
+
+        travel_ramping_lift              => 'z_hop_types',
+        # travel_max_lift
+        travel_slope                     => 'travel_slope',
+
     },
     'physical_printer' => {
         host_type                    => 1,
@@ -669,7 +687,7 @@ my %multivalue_params = (
     machine_max_jerk_z                  => 'array',
     machine_min_extruding_rate          => 'array',
     machine_min_travel_rate             => 'array',
-    nozzle_diameter                     => 'single',
+    nozzle_diameter                     => 'array',
     bed_shape                           => 'array',
     retract_before_wipe                 => 'single',
     retract_length_toolchange           => 'single',
@@ -810,6 +828,10 @@ my %interface_patterns = (
     grid                   => 1
 );
 
+my %arc_fitting = (
+    emit_center             => 1,
+);
+
 # Recognized gcode flavors
 my %gcode_flavors = (
     klipper        => 'klipper',
@@ -922,6 +944,7 @@ sub convert_params {
 
     # Track state of combination settings
     if ( exists $status{to_var}{$parameter} ) {
+        print "Converting $parameter $new_value %source_ini\n";
         $status{to_var}{$parameter} = $new_value ? 1 : 0;
         return;
     }
@@ -1022,6 +1045,10 @@ sub convert_params {
             return $zhop_enforcement{$new_value->[0]};
         },
 
+        'travel_ramping_lift' => sub {
+            return $new_value eq '1' ? 'Slope Lift' : 'Auto Lift';
+        },
+
         # Give user a choice about "compatible" condition strings
         'compatible_printers_condition' => $handle_compatible_condition,
         'compatible_prints_condition'   => $handle_compatible_condition,
@@ -1115,6 +1142,14 @@ sub convert_params {
               : 'auto';
         },
 
+        'arc_fitting' => sub {
+            return (exists $arc_fitting{$new_value} ? '1' : '0');
+        },
+
+        'gcode_label_objects' => sub {
+            return $new_value ne 'disabled' ? '1' : '0';
+        },
+
         # Translate seam position
         'seam_position' => sub { return $seam_positions{$new_value} },
 
@@ -1145,9 +1180,6 @@ sub convert_params {
         # Interpret empty extrusion_width as zero
         'extrusion_width' =>
           sub { return ( $new_value eq "" ) ? '0' : $new_value },
-
-        # Convert numerical input to boolean
-        'infill_every_layers' => sub { return ( $new_value > 0 ) ? '1' : '0' },
 
         # Super/PrusaSlicer have this as boolean where OrcaSlicer offers
         # choices in a dropdown
@@ -1255,40 +1287,59 @@ sub calculate_print_params {
         $new_hash{ $speed_params{$parameter} } = "" . $new_value;
     }
 
+    # Translate infill combination
+    my $infill_every_layers = $source_ini{'infill_every_layers'};
+    if (defined $infill_every_layers) {
+        # PrusaSlicer should ensure that if infill_every_layers is set,
+        # automatic infill combination isn't, so hopefully we're not clobbering
+        # anything here.
+        $new_hash{'infill_combination'} = $infill_every_layers > 1 ? '1' : '0';
+        if ($infill_every_layers > 1) {
+            $new_hash{'infill_combination_max_layer_height'} = $infill_every_layers * $source_ini{'layer_height'};
+        }
+    }
+
     # Translate the Dynamic Overhangs thresholds
     my $enable_dynamic_overhang_speeds =
-      !!$source_ini{'enable_dynamic_overhang_speeds'};
-    $new_hash{'enable_overhang_speed'} =
-      $enable_dynamic_overhang_speeds ? '1' : '0';
-    if ($enable_dynamic_overhang_speeds) {
-        my @speeds;
-        if ( $status{slicer_flavor} eq 'SuperSlicer' ) {
-            @speeds =
-              split( ',', $source_ini{'dynamic_overhang_speeds'} );
-        }
-        else {
-            @speeds = (
-                $source_ini{'overhang_speed_0'},
-                $source_ini{'overhang_speed_1'},
-                $source_ini{'overhang_speed_2'},
-                $source_ini{'overhang_speed_3'}
+      $source_ini{'enable_dynamic_overhang_speeds'};
+    if (defined $enable_dynamic_overhang_speeds) {
+        $new_hash{'enable_overhang_speed'} =
+          $enable_dynamic_overhang_speeds ? '1' : '0';
+        if ($enable_dynamic_overhang_speeds) {
+            my @speeds;
+            if ( $status{slicer_flavor} eq 'SuperSlicer' ) {
+                @speeds =
+                  split( ',', $source_ini{'dynamic_overhang_speeds'} );
+            }
+            else {
+                @speeds = (
+                    $source_ini{'overhang_speed_0'},
+                    $source_ini{'overhang_speed_1'},
+                    $source_ini{'overhang_speed_2'},
+                    $source_ini{'overhang_speed_3'}
+                );
+            }
+            my @overhang_speed_keys = (
+                'overhang_1_4_speed', 'overhang_2_4_speed',
+                'overhang_3_4_speed', 'overhang_4_4_speed'
             );
+            @new_hash{@overhang_speed_keys} = @speeds[ 3, 2, 1, 0 ];
         }
-        my @overhang_speed_keys = (
-            'overhang_1_4_speed', 'overhang_2_4_speed',
-            'overhang_3_4_speed', 'overhang_4_4_speed'
-        );
-        @new_hash{@overhang_speed_keys} = @speeds[ 3, 2, 1, 0 ];
     }
 
     # Set the wall infill order string based on the tracked sequence options
-    $new_hash{'wall_infill_order'} =
-      evaluate_print_order( $status{to_var}{external_perimeters_first},
+    my $xtmp = evaluate_print_order( $status{to_var}{external_perimeters_first},
         $status{to_var}{infill_first} );
+    if (defined $xtmp)  {
+        $new_hash{'wall_infill_order'} = $xtmp;
+    };
 
     # Set the ironing type based on the tracked options
-    $new_hash{'ironing_type'} =
+    $xtmp = 
       evaluate_ironing_type( $status{to_var}{ironing}, $status{ironing_type} );
+    if (defined $xtmp) {
+        $new_hash{'ironing_type'} = $xtmp;
+    }
 
     return %new_hash;
 }
@@ -1428,10 +1479,10 @@ sub reset_loop {
     $status{max_temp} = 0;
     $status{ini_type}                          //= undef;
     $status{profile_name}                      //= undef;
-    $status{to_var}{external_perimeters_first} //= undef;
-    $status{to_var}{infill_first}              //= undef;
-    $status{to_var}{ironing}                   //= undef;
-    $status{ironing_type}                      //= undef;
+    $status{to_var}{external_perimeters_first} = undef;
+    $status{to_var}{infill_first}              = undef;
+    $status{to_var}{ironing}                   = undef;
+    $status{ironing_type}                      = undef;
     for my $param ( keys %{ $status{reset} } ) {
         if ( $status{reset}{$param} ) {
             $status{value}{$param} = undef;
@@ -1683,19 +1734,20 @@ foreach my $index ( 0 .. $#expanded_input_files ) {
     # Add additional general metadata to the JSON data
     %new_hash = (
         %new_hash,
-        $status{ini_type} . "_settings_id" => $profile_name,
+        # $status{ini_type} . "_settings_id" => $profile_name,
+        # is_custom_defined                  => '1',
+        # version                            => $ORCA_SLICER_VERSION
+        from                               => 'system',
+        instantiation                      => rindex($profile_name, '*', 0) == 0 ? "false" : "true",
         name                               => $profile_name,
-        from                               => 'User',
-        is_custom_defined                  => '1',
-        version                            => $ORCA_SLICER_VERSION
+        type                               => $system_directories{'output'}{$status{ini_type}}[2],
     );
 
     # Add additional profile-specific metadata to the JSON data
     if ( $status{ini_type} eq 'filament' ) {
         %new_hash = (
             %new_hash,
-            nozzle_temperature_range_low  => '0',
-            nozzle_temperature_range_high => "" . $status{max_temp},
+            filament_id => $profile_name,
             ( exists $source_ini{'slowdown_below_layer_time'} )
             ? ( slow_down_for_layer_cooling =>
                   ( $source_ini{'slowdown_below_layer_time'} > 0 ) ? '1' : '0' )
@@ -1705,11 +1757,12 @@ foreach my $index ( 0 .. $#expanded_input_files ) {
     elsif ( $status{ini_type} eq 'print' ) {
         %new_hash = ( calculate_print_params(%source_ini) );
     }
-    elsif ( $status{ini_type} eq 'printer' ) {
-        my %inherits          = link_system_printer($file);
-        my %phys_printer_data = handle_physical_printer($input_file);
-        %new_hash = ( %new_hash, %phys_printer_data, %inherits );
-    }
+
+    #elsif ( $status{ini_type} eq 'printer' ) {
+    #    my %inherits          = link_system_printer($file);
+    #    my %phys_printer_data = handle_physical_printer($input_file);
+    #    %new_hash = ( %new_hash, %phys_printer_data, %inherits );
+    #}
 
     # Check if the output file already exists and handle overwrite option
     if ( -e $output_file ) {
